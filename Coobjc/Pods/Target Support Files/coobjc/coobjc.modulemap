@@ -1,0 +1,6 @@
+framework module coobjc {
+  umbrella header "coobjc-umbrella.h"
+
+  export *
+  module * { export * }
+}

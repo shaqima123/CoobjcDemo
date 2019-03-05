@@ -1,0 +1,19 @@
+PODS:
+  - cokit (1.0.0):
+    - coobjc (~> 1.0.0)
+  - coobjc (1.0.1):
+    - fishhook (~> 0.2.0)
+  - fishhook (0.2)
+
+DEPENDENCIES:
+  - cokit
+  - coobjc
+
+SPEC CHECKSUMS:
+  cokit: 49b2765c7cf6218edfd90a4cf8dccc1939d2a5e8
+  coobjc: 1954a85a5d83854810418114bf841fb60980b1b6
+  fishhook: ea19933abfe8f2f52c55fd8b6e2718467d3ebc89
+
+PODFILE CHECKSUM: d91a99021fe5d2900838c9292819278571774e7f
+
+COCOAPODS: 1.4.0

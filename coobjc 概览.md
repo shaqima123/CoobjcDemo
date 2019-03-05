@@ -91,6 +91,68 @@ co_launch_onqueue(q, ^{
 
 ```
 
+```
+co_launch_now(^{
+    NSLog(@"deal things in coroutine now");
+});
+```
+
+创建一个协程的便携方式有以上几种，你可以控制协程创建在哪个 queue 上，或者控制协程的 resume 是同步还是异步。
+
+-> Code testForLaunch
+
+```
+- (void)testForLaunch {
+    co_launch(^{
+        NSLog(@"deal things in coroutine 1");
+    });
+    
+    co_launch_now(^{
+        NSLog(@"deal things in coroutine now");
+    });
+    
+    co_launch(^{
+        NSLog(@"deal things in coroutine 2");
+    });
+    NSLog(@"testForLaunch");
+}
+```
+我们运行跑一下 demo 中的 testForLaunch 方法，通过控制台输出或者打断点的方式可以看到，代码的执行顺序是 1. co\_launch\_now 的 block 2.NSLog(@"testForLaunch"); 3. 第一个 co\_launch 的 block 4.第二个 co\_launch 的 block。
+
+为什么执行顺序是这样呢？
+
+我们在 co\_launch 中打断点就可以看到函数的调用栈如下：
+![img1](https://i.loli.net/2019/03/05/5c7e314e94670.png)
+
+co\_launch 的作用就是创建一个协程并 resume，然后在 CoCoroutine 的 resume 方法中，我们可以看到它的内部实现：
+
+```
+- (COCoroutine *)resume {
+    dispatch_async(self.queue, ^{
+        if (self.isResume) {
+            return;
+        }
+        self.isResume = YES;
+        coroutine_resume(self.co);
+    });
+    return self;
+}
+
+- (void)resumeNow {
+    [self performBlockOnQueue:^{
+        if (self.isResume) {
+            return;
+        }
+        self.isResume = YES;
+        coroutine_resume(self.co);
+    }];
+}
+```
+
+没错，resume 的内部代码是通过异步的方法去调用的，而 resumeNow
+也就是 co\_launch\_now 调用的 resumeNow 方法是同步执行代码块的。在 resume 之后，就会调用 Cocoroutine 的 execute 方法
+去执行 co_launch block 中的代码。这就解释了 testForLaunch 中代码的执行顺序问题。
+
 ### Await
 ```
 /**
@@ -116,7 +178,7 @@ coobjc 的 COChan，也就是 Channel,是 CSP(Communicating Sequential Processes
 
 > channel 是被单独创建并且可以在进程之间传递，它的通信模式类似于 boss-worker 模式的，一个实体通过将消息发送到channel 中，然后又监听这个 channel 的实体处理，两个实体之间是匿名的，这个就实现实体中间的解耦，其中 channel 是同步的一个消息被发送到 channel 中，最终是一定要被另外的实体消费掉的，在实现原理上其实是一个阻塞的消息队列。
 
-画重点：channel 在实现原理上其实是一个阻塞的消息队列
+画重点：**channel 在实现原理上其实是一个阻塞的消息队列**
 
 那么在 coobjc 中也是使用 COCoroutine 做为并发实体，coroutine 非常轻量级可以创建几十万个实体。实体间通过 COChan 继续匿名消息传递使之解耦。
 
@@ -131,6 +193,7 @@ COChan 类的结构也比较简单，整个 .h 文件中，只有 COChan 的初�
 在 coobjc 中，COChan 的 send 和 receive 分别有两种方法。一种是有缓冲区，另一种是没有缓冲区的方法。
 
 -> Code testForChannelWithNoCache 
+运行一下 testForChannelWithNoCache 代码并观察控制台输出的结果，思考如果把 receive 和 send 改成 receive_nonblock 和 send_nonblock 方法结果会怎么样？ 如果只改其中的一个呢？
 
 PS: 
 
@@ -169,11 +232,96 @@ COPromise 和前端中的 Promise 用法大致相同。
 ```
 
 ### 回到 Await
--> Code co_fetchSomethingAsynchronous
+-> Code testForAwaitPromise
 
--> Code co_fetchSomething
+```
+/// COPromise
+- (COPromise<id> *)co_fetchSomethingAsynchronous {
+    
+    return [COPromise promise:^(COPromiseFullfill  _Nonnull fullfill, COPromiseReject  _Nonnull reject) {
+        NSError *error = nil;
+        int number = arc4random() % 2;
+        if (number) {
+            NSLog(@"result is %d,spend some time to deal it..",number);
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(1.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+                fullfill(@(number));
+            });
+        } else {
+            NSLog(@"result is %d,throw out an error.",number);
+            error = [NSError errorWithDomain:@"error" code:10000 userInfo:nil];
+            reject(error);
+        }
+    } onQueue:dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0)];
+}
 
-??? 
+- (void)testForAwaitPromise {
+    co_launch(^{
+        id ret = await([self co_fetchSomethingAsynchronous]);
+        NSError *error = co_getError();
+        
+        if (error) {
+            NSLog(@"get an error in testForAwait, error: %@",error);
+        } else {
+            NSLog(@"get the result in testForAwait,value:%d",[ret intValue]);
+        }
+    });
+}
+```
+-> Code testForAwaitChan
+
+```
+/// COChan
+- (COChan<id> *)co_fetchSomething {
+    COChan *chan = [COChan chan];
+    dispatch_async(dispatch_get_global_queue(DISPATCH_QUEUE_PRIORITY_DEFAULT, 0), ^{
+        NSError *error = nil;
+        int number = arc4random() % 2;
+        if (number) {
+            NSLog(@"result is %d",number);
+            //??? 如果使用send？
+            [chan send_nonblock:@(number)];
+        } else {
+            NSLog(@"result is %d,throw out an error.",number);
+            error = [NSError errorWithDomain:@"error" code:10000 userInfo:nil];
+            [chan send_nonblock:error];
+        }
+    });
+    return chan;
+}
+
+- (COChan<id> *)co_fetchSomething1 {
+    COChan *chan = [COChan chan];
+    co_launch(^{
+        NSError *error = nil;
+        int number = arc4random() % 2;
+        if (number) {
+            NSLog(@"result is %d",number);
+            //??? 如果使用send？
+            [chan send:@(number)];
+        } else {
+            NSLog(@"result is %d,throw out an error.",number);
+            error = [NSError errorWithDomain:@"error" code:10000 userInfo:nil];
+            [chan send:error];
+        }
+    });
+    return chan;
+}
+
+- (void)testForAwaitChan {
+    co_launch(^{
+        id ret = await([self co_fetchSomething]);
+        if ([ret isKindOfClass:[NSError class]]) {
+            NSLog(@"get an error in testForAwaitChan, error: %@",ret);
+        } else {
+            NSLog(@"get the result in testForAwaitChan,value:%d",[ret intValue]);
+        }
+    });
+}
+
+```
+运行 testForAwaitPromise 和 testForAwaitChan 了解 promise 和 chan 作为返回类型时，await 的使用方法。
+ 
+思考🤔：
 
 1. 在 co\_fetchSomething 中，如果把 send_nonblock 方法改成 send 方法会怎么样？
 2. 如果想要用 send 方法去实现，需要怎么做？
@@ -181,9 +329,84 @@ COPromise 和前端中的 Promise 用法大致相同。
 
 3. 在 co\_fetchSomething1 中，如果把 co_launch 注释掉会怎么样？
 
+解答：
+
+1. 会发生崩溃。可以看到控制台输出内容：reason: 'send blocking must call in a coroutine.' 为什么呢？ 因为在 co_fetchSomething 中，代码是异步到 global queue 上去执行的，也就是在异步线程的环境，已经不是在之前的那条协程的环境下了。而 send 或者 receive 方法只能在 coroutine 中使用，所以就会发生以上报错。
+
+2. 如果想要用 send 可以如 co\_fetchSomething1 方法所示，另外开辟一个协程，并且将代码放到该协程的执行块中执行。
+
+3. 如果注释掉 co\_launch，为什么不会执行 testForAwaitChan 的 log 输出呢？因为如果没有开启新的 coroutine，也没有异步到其他线程上去做，那么其实当前的环境就是外部的 coroutine 环境。然后在调用到 send 的时候，是先执行 [self co\_fetchSomething] 再执行 await。上面我们提到过，send 方法在没有接收数据并且 channel 的 buffer 已经满的情况下，会阻塞当前协程。所以，导致外部 [self co\_fetchSomething] 的 log 没有输出。
+
+所以以上阻塞的情况该如何解决呢？ 就从 send 阻塞的条件入手，如果有人 receive 或者 buffer 不满的话，就可以破除阻塞。我们可以注意到在 co_fetchSomething1 中，chan 的初始化方法是     COChan *chan = [COChan chan]; 的。那么我们看到 chan 方法到底做了什么东西：
+
+```
++ (instancetype)chan {
+    COChan *chan = [[self alloc] initWithBuffCount:0];
+    return chan;
+}
+
++ (instancetype)chanWithBuffCount:(int32_t)buffCount {
+    COChan *chan = [[self alloc] initWithBuffCount:buffCount];
+    return chan;
+}
+
++ (instancetype _Nonnull )expandableChan {
+    COChan *chan = [[self alloc] initWithBuffCount:-1];
+    return chan;
+}
+```
+
+COChan 的初始化方法中，我们看到 chan 方法其实提供的 buffer count 为 0，也就是说缓冲区大小为0，所以我们在调用 send 方法并且没有人 receive 的时候会直接导致协程挂起。那么我们可以注意到，chan 还有另外两个初始化的方法，一个是指定 buffer 大小，另一个是根据需要会自动扩充 buffer 区的方法。我们用后者任何一个方法初始化有 buffer 区的 channel 都可以解除 send 阻塞的问题啦。
+
 - Await 的内部实现
 
-await 内部对参数进行了类型判断，如果是 Channel 就调用 channel 的 receive 方法，阻塞当前的协程并且等待 receive 返回值，这也就是 await 会使当前 coroutine 挂起的原因。那么如果参数是 Promise 类型，那么内部会生成一个 Channel，将这个 Channel 与 Promise 绑定在一起，然后调用 channel 的 receive 方法，阻塞当前的协程并且等待返回值。当 Promise 返回处理结果时，channel 会通过 send_nonblock 的方法将值 send 过来，然后由于这时候 channel 在 receive 等待中，所以 receive 会马上接收到这个值然后返回结果。那么，如果 Promise 返回的是 error， send_nonblock 会塞一个 nil 进来。所以外部可以通过值是否为 nil 来判断是否发生了错误。
+```
+id co_await(id awaitable) {
+    coroutine_t  *t = coroutine_self();
+    if (t == nil) {
+        @throw [NSException exceptionWithName:COInvalidException reason:@"Cannot call co_await out of a coroutine" userInfo:nil];
+    }
+    if (t->is_cancelled) {
+        return nil;
+    }
+    
+    if ([awaitable isKindOfClass:[COChan class]]) {
+        COCoroutine *co = co_get_obj(t);
+        co.lastError = nil;
+        id val = [(COChan *)awaitable receive];
+        return val;
+    } else if ([awaitable isKindOfClass:[COPromise class]]) {
+        
+        COChan *chan = [COChan chanWithBuffCount:1];
+        COCoroutine *co = co_get_obj(t);
+        
+        COPromise *promise = awaitable;
+        [[promise
+          then:^id _Nullable(id  _Nullable value) {
+              [chan send_nonblock:value];
+              return value;
+          }]
+         catch:^(NSError * _Nonnull error) {
+             co.lastError = error;
+             [chan send_nonblock:nil];
+         }];
+        
+        [chan onCancel:^(COChan * _Nonnull chan) {
+            [promise cancel];
+        }];
+        
+        id val = [chan receive];
+        return val;
+        
+    } else {
+        @throw [NSException exceptionWithName:COInvalidException
+                                       reason:[NSString stringWithFormat:@"Cannot await object: %@.", awaitable]
+                                     userInfo:nil];
+    }
+}
+```
+
+await 内部对参数进行了类型判断，如果是 Channel 就调用 channel 的 receive 方法，阻塞当前的协程并且等待 receive 返回值，这也就是 await 会使当前 coroutine 挂起的原因。那么如果参数是 Promise 类型，那么内部会生成一个 Channel，将这个 Channel 与 Promise 绑定在一起，然后调用 channel 的 receive 方法，阻塞当前的协程并且等待返回值。当 Promise 返回处理结果时，channel 会通过 send\_nonblock 的方法将值 send 过来，然后由于这时候 channel 在 receive 等待中，所以 receive 会马上接收到这个值然后返回结果。那么，如果 Promise 返回的是 error， send\_nonblock 会塞一个 nil 进来。所以外部可以通过值是否为 nil 来判断是否发生了错误。
 
 -
 ### Generator
@@ -193,6 +416,9 @@ await 内部对参数进行了类型判断，如果是 Channel 就调用 channel
 生成器可以在很多场景中进行使用，比如消息队列、批量下载文件、批量加载缓存等：
 
 ![Generator](https://github.com/alibaba/coobjc/raw/master/docs/images/generator_execute.png)
+
+-> Code testForRandomGenerator
+执行 demo 中的 testForRandomGenerator 方法，观察输出。
 
 ```
 - (void)testForRandomGenerator {
@@ -223,6 +449,10 @@ await 内部对参数进行了类型判断，如果是 Channel 就调用 channel
 使用生成器去实现生产者消费者模型的时候，我们可以把传统的生产者生产出东西，然后去通知消费者消费的方式转变为 消费者需要消费的时候去告诉生产者马上生产出东西来给我。与传统的模式相比，使用生成器实现的方式，避免了去使用一些多线程共享的变量计算，也避免了锁的使用。
 
 ？？？： 如果注释掉 [generator cancel] 会有什么问题？
+
+如果注释掉 cancel 会导致 generator 继续生成一个数据。因为在调用最后一个 next 的时候，生成器会继续往下执行一个循环。
+
+这里还有一个问题：为什么 generator 和 外部调用 next 的循环都是两次两次执行输出呢？
 
 ### Actor
 
@@ -306,9 +536,47 @@ message 的 complete 方法内部其实就是返回 promise 的 fulfill 值。
 
 -> Code testForActor
 
+```
+- (void)testForActor {
+    COActor *countActor = co_actor(^(COActorChan * _Nonnull channel) {
+        //定义actor的状态变量
+        int count = 0;
+        for (COActorMessage *message in channel) {
+            //处理消息
+            if ([[message stringType] isEqualToString:@"inc"]) {
+                count++;
+                NSLog(@"the count is %d now.", count);
+            }
+            else if ([[message stringType] isEqualToString:@"get"]) {
+                message.complete(@(count));
+                NSLog(@"get the count %d", count);
+            }
+        }
+    });
+    
+//     给 actor 发送消息
+//    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3.0 * NSEC_PER_SEC)), dispatch_get_main_queue(), ^{
+        [countActor sendMessage:@"inc"];
+        [countActor sendMessage:@"inc"];
+//    });
+
+    id value = [countActor sendMessage:@"get"].value;
+    NSLog(@"the Actor count now is %d",[value intValue]);
+
+//    co_launch(^{
+//        id ret = await([countActor sendMessage:@"get"]);
+//        NSLog(@"the Actor count now is %d",[ret intValue]);
+//    });
+}
+
+```
+运行代码 testForActor 观察控制台输出。
+
 ？？？ 
 1. 为什么发送 get 获取到值为0？
+通过之前的 co\_launch 执行顺序可以了解到，co_launch 是异步唤醒的，所以会先执行下面 get 的代码，这时候 execute block 还未执行，所以得到的值就是 0。
 
+我们可以用上面提到过的 await 方法去获取这个 promise 的返回值。
 
 - sendMessage的内部实现：
 
@@ -324,10 +592,6 @@ message 的 complete 方法内部其实就是返回 promise 的 fulfill 值。
 }
 ```
 sendMessage 内部其实是初始化了一个 Promise，然后再异步根据 promise 和 消息内容生成一个 COActorMessage，然后对这个 Actor 中的 channel 通过 send_nonblock 发送这个 message。
-
-划重点：send_nonblock ！也就是说 sendMessage 并不会阻塞当前的代码/协程，所以如果直接通过获取 promise 的 value 值的时候，根本还没有值返回，所以得到为 0。
-
-我们可以用上面提到过的 await 方法去获取这个 promise 的返回值。
 
 ？？？
 1. 那么我们在初始化 actor 的时候去设置了这个 excute block，在 sendMessage 的时候往 channel 中 send 了消息。那，有关 receive 的代码呢？

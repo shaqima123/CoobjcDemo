@@ -56,7 +56,7 @@
     
     co_launch(^{
         NSLog(@"deal things before in coroutine 2");
-        [ch1 send_nonblock:@(1)];
+        [ch1 send:@(1)];
         NSLog(@"write value to chanel 2");
         NSLog(@"deal things after in coroutine 2");
     });
@@ -109,11 +109,11 @@
         if (number) {
             NSLog(@"result is %d",number);
             //??? 如果使用send？
-            [chan send:@(number)];
+            [chan send_nonblock:@(number)];
         } else {
             NSLog(@"result is %d,throw out an error.",number);
             error = [NSError errorWithDomain:@"error" code:10000 userInfo:nil];
-            [chan send:error];
+            [chan send_nonblock:error];
         }
     });
     return chan;
@@ -139,7 +139,7 @@
 
 - (void)testForAwaitChan {
     co_launch(^{
-        id ret = await([self co_fetchSomething1]);
+        id ret = await([self co_fetchSomething]);
         if ([ret isKindOfClass:[NSError class]]) {
             NSLog(@"get an error in testForAwaitChan, error: %@",ret);
         } else {
@@ -203,10 +203,10 @@
     id value = [countActor sendMessage:@"get"].value;
     NSLog(@"the Actor count now is %d",[value intValue]);
 
-    co_launch(^{
-        id ret = await([countActor sendMessage:@"get"]);
-        NSLog(@"the Actor count now is %d",[ret intValue]);
-    });
+//    co_launch(^{
+//        id ret = await([countActor sendMessage:@"get"]);
+//        NSLog(@"the Actor count now is %d",[ret intValue]);
+//    });
 }
 
 @end
